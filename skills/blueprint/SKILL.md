@@ -3,161 +3,56 @@ name: blueprint
 description: Define reusable Airflow task group templates with Pydantic validation and compose DAGs from YAML. Use when creating blueprint templates, composing DAGs from YAML, validating configurations, or enabling no-code DAG authoring for non-engineers.
 ---
 
-# Blueprint: Template-Based DAG Authoring
+# Blueprint Implementation
 
-Blueprint lets platform teams define reusable task group templates in Python and compose them into Airflow DAGs via YAML. Non-engineers can assemble production DAGs without writing Airflow code.
+You are helping a user work with Blueprint, a system for composing Airflow DAGs from YAML using reusable Python templates. Execute steps in order and prefer the simplest configuration that meets the user's needs.
 
 > **Package**: `airflow-blueprint` on PyPI
 > **Repo**: https://github.com/astronomer/blueprint
 > **Requires**: Python 3.10+, Airflow 2.5+
 
-> **Before starting**, confirm: (1) Airflow version ≥2.5, (2) Python ≥3.10, (3) use case fits Blueprint (standardized templates vs full Airflow flexibility).
+## Before Starting
+
+Confirm with the user:
+1. **Airflow version** ≥2.5
+2. **Python version** ≥3.10
+3. **Use case**: Blueprint is for standardized, validated templates. If user needs full Airflow flexibility, suggest writing DAGs directly or using DAG Factory instead.
 
 ---
 
-## When to Use Blueprint
+## Determine What the User Needs
 
-| Use Case | Blueprint | Alternative |
-|----------|-----------|-------------|
-| Platform teams standardizing task patterns | Yes | - |
-| Analysts/data scientists creating DAGs | Yes | - |
-| Type-safe, validated configurations | Yes | - |
-| Versioned templates for backwards compat | Yes | - |
-| Full Airflow API flexibility | No | DAG Factory |
-| One-off custom DAGs | No | Write Python directly |
-
----
-
-## Implementation Workflow
-
-```
-+------------------------------------------+
-| 1. INSTALL                               |
-|    Add airflow-blueprint to requirements |
-+------------------------------------------+
-                |
-+------------------------------------------+
-| 2. DEFINE BLUEPRINTS                     |
-|    Create Python classes with configs    |
-+------------------------------------------+
-                |
-+------------------------------------------+
-| 3. CREATE LOADER                         |
-|    Add loader.py with build_all()        |
-+------------------------------------------+
-                |
-+------------------------------------------+
-| 4. COMPOSE DAGS                          |
-|    Write *.dag.yaml files                |
-+------------------------------------------+
-                |
-+------------------------------------------+
-| 5. VALIDATE                              |
-|    Run blueprint lint                    |
-+------------------------------------------+
-                |
-+------------------------------------------+
-| 6. TEST                                  |
-|    Parse DAG, run in Airflow             |
-+------------------------------------------+
-```
+| User Request | Action |
+|--------------|--------|
+| "Create a blueprint" / "Define a template" | Go to **Creating Blueprints** |
+| "Create a DAG from YAML" / "Compose steps" | Go to **Composing DAGs in YAML** |
+| "Validate my YAML" / "Lint blueprint" | Go to **Validation Commands** |
+| "Set up blueprint in my project" | Go to **Project Setup** |
+| "Version my blueprint" | Go to **Versioning** |
+| "Generate schema for IDE" | Go to **Schema Generation** |
+| Blueprint errors / troubleshooting | Go to **Troubleshooting** |
 
 ---
 
-## 1. Install Blueprint
+## Project Setup
 
-Add to your Airflow project requirements:
+If the user is starting fresh, guide them through setup:
+
+### 1. Install the Package
 
 ```bash
-# requirements.txt
+# Add to requirements.txt
 airflow-blueprint>=0.1.1
-```
 
-Or install directly:
-
-```bash
-uv add airflow-blueprint
+# Or install directly
 pip install airflow-blueprint
 ```
 
-**Validate**: `pip show airflow-blueprint` shows version ≥0.1.1
+### 2. Create the Loader
 
----
-
-## 2. Define Blueprint Templates
-
-Create blueprints in Python files (typically `dags/templates/` or `dags/`):
+Create `dags/loader.py`:
 
 ```python
-# dags/etl_blueprints.py
-from airflow.operators.bash import BashOperator
-from airflow.utils.task_group import TaskGroup
-from blueprint import Blueprint, BaseModel, Field
-
-class ExtractConfig(BaseModel):
-    source_table: str = Field(description="Source table (schema.table)")
-    batch_size: int = Field(default=1000, ge=1)
-
-class Extract(Blueprint[ExtractConfig]):
-    """Extract data from a source table."""
-
-    def render(self, config: ExtractConfig) -> TaskGroup:
-        with TaskGroup(group_id=self.step_id) as group:
-            BashOperator(
-                task_id="validate",
-                bash_command=f"echo 'Validating {config.source_table}'"
-            )
-            BashOperator(
-                task_id="extract",
-                bash_command=f"echo 'Extracting {config.batch_size} rows'"
-            )
-        return group
-
-class LoadConfig(BaseModel):
-    target_table: str
-    mode: str = Field(default="append", pattern="^(append|overwrite)$")
-
-class Load(Blueprint[LoadConfig]):
-    """Load data to a target table."""
-
-    def render(self, config: LoadConfig) -> BashOperator:
-        return BashOperator(
-            task_id=self.step_id,
-            bash_command=f"echo 'Loading to {config.target_table} ({config.mode})'"
-        )
-```
-
-### Blueprint Authoring Rules
-
-| Rule | Details |
-|------|---------|
-| `render()` return type | **TaskGroup** or single **BaseOperator** |
-| Config model | **Pydantic BaseModel** with validation |
-| Task/group IDs | Use `self.step_id` (set by framework) |
-| Field descriptions | Become form labels in Astro IDE |
-
-### Strict Validation (Recommended)
-
-Catch typos in YAML by forbidding unknown fields:
-
-```python
-from pydantic import BaseModel, ConfigDict
-
-class ExtractConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source_table: str
-    batch_size: int = 1000
-```
-
----
-
-## 3. Create Loader
-
-Create a loader file that discovers YAML and renders DAGs:
-
-```python
-# dags/loader.py
 from blueprint import build_all
 
 build_all(
@@ -167,172 +62,196 @@ build_all(
 )
 ```
 
-### DAG Defaults
+### 3. Verify Installation
 
-Set org-wide defaults. YAML values take precedence. Dict fields are deep-merged.
+```bash
+uvx --from airflow-blueprint blueprint list
+```
+
+If no blueprints found, user needs to create blueprint classes first.
+
+---
+
+## Creating Blueprints
+
+When user wants to create a new blueprint template:
+
+### Blueprint Structure
 
 ```python
-build_all(
-    dag_defaults={
-        "schedule": "@daily",
-        "tags": ["managed"],
-        "default_args": {
-            "owner": "data-team",
-            "retries": 2,
-            "retry_delay_seconds": 300,
-        },
-    }
-)
+# dags/templates/my_blueprints.py
+from airflow.operators.bash import BashOperator
+from airflow.utils.task_group import TaskGroup
+from blueprint import Blueprint, BaseModel, Field
+
+class MyConfig(BaseModel):
+    # Required field with description (becomes form label in IDE)
+    source_table: str = Field(description="Source table name")
+    # Optional field with default and validation
+    batch_size: int = Field(default=1000, ge=1)
+
+class MyBlueprint(Blueprint[MyConfig]):
+    """Docstring becomes blueprint description."""
+
+    def render(self, config: MyConfig) -> TaskGroup:
+        with TaskGroup(group_id=self.step_id) as group:
+            BashOperator(
+                task_id="my_task",
+                bash_command=f"echo '{config.source_table}'"
+            )
+        return group
+```
+
+### Key Rules
+
+| Element | Requirement |
+|---------|-------------|
+| Config class | Must inherit from `BaseModel` |
+| Blueprint class | Must inherit from `Blueprint[ConfigClass]` |
+| `render()` method | Must return `TaskGroup` or `BaseOperator` |
+| Task IDs | Use `self.step_id` for the group/task ID |
+
+### Recommend Strict Validation
+
+Suggest adding `extra="forbid"` to catch YAML typos:
+
+```python
+from pydantic import ConfigDict
+
+class MyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # fields...
 ```
 
 ---
 
-## 4. Compose DAGs in YAML
+## Composing DAGs in YAML
 
-Create `*.dag.yaml` files in your `dags/` directory:
+When user wants to create a DAG from blueprints:
+
+### YAML Structure
 
 ```yaml
-# dags/customer_pipeline.dag.yaml
-dag_id: customer_pipeline
+# dags/my_pipeline.dag.yaml
+dag_id: my_pipeline
 schedule: "@daily"
-tags: [etl, customers]
+tags: [etl]
 
 steps:
-  extract_customers:
-    blueprint: extract
+  step_one:
+    blueprint: my_blueprint
     source_table: raw.customers
     batch_size: 500
 
-  extract_orders:
-    blueprint: extract
-    source_table: raw.orders
-
-  load:
-    blueprint: load
-    depends_on: [extract_customers, extract_orders]
-    target_table: analytics.customer_orders
-    mode: overwrite
+  step_two:
+    blueprint: another_blueprint
+    depends_on: [step_one]
+    target: analytics.output
 ```
 
-### Reserved Keys
+### Reserved Keys in Steps
 
 | Key | Purpose |
 |-----|---------|
-| `blueprint` | Which blueprint template to use (required) |
-| `depends_on` | List of step names this step waits for |
-| `version` | Pin to a specific blueprint version |
+| `blueprint` | Template name (required) |
+| `depends_on` | List of upstream step names |
+| `version` | Pin to specific blueprint version |
 
-Everything else is passed to the blueprint's config model.
+Everything else passes to the blueprint's config.
 
-### Jinja2 Templating
+### Jinja2 Support
 
-YAML supports Airflow runtime context:
+YAML supports Airflow context:
 
 ```yaml
-dag_id: "{{ env.get('ENV', 'dev') }}_customer_etl"
-schedule: "{{ var.value.etl_schedule | default('@daily') }}"
-
-steps:
-  extract:
-    blueprint: extract
-    source_table: "{{ var.value.source_schema }}.customers"
+dag_id: "{{ env.get('ENV', 'dev') }}_pipeline"
+schedule: "{{ var.value.schedule | default('@daily') }}"
 ```
 
 ---
 
-## 5. Validate
+## Validation Commands
 
-Run CLI with uvx (no installation required):
+Run CLI commands with uvx:
 
 ```bash
 uvx --from airflow-blueprint blueprint <command>
 ```
 
-Or if installed:
-
-```bash
-blueprint <command>
-```
-
-### CLI Commands
-
-| Command | Purpose |
-|---------|---------|
-| `blueprint list` | List available blueprints |
-| `blueprint describe <name>` | Show config schema and example YAML |
-| `blueprint describe <name> -v <N>` | Describe specific version |
-| `blueprint lint [path]` | Validate DAG YAML (all `*.dag.yaml` if no path) |
-| `blueprint schema <name>` | Generate JSON Schema for editor support |
-| `blueprint new` | Create new DAG YAML interactively |
+| Command | When to Use |
+|---------|-------------|
+| `blueprint list` | Show available blueprints |
+| `blueprint describe <name>` | Show config schema for a blueprint |
+| `blueprint describe <name> -v N` | Show schema for specific version |
+| `blueprint lint` | Validate all `*.dag.yaml` files |
+| `blueprint lint <path>` | Validate specific file |
+| `blueprint schema <name>` | Generate JSON schema |
+| `blueprint new` | Interactive DAG YAML creation |
 
 ### Validation Workflow
 
 ```bash
-# Validate all DAG YAML files
+# Check all YAML files
 blueprint lint
 
-# Validate specific file
-blueprint lint dags/customer_pipeline.dag.yaml
-
-# Check with custom template directory
-blueprint lint --template-dir dags/templates/
+# Expected output for valid files:
+# PASS customer_pipeline.dag.yaml (dag_id=customer_pipeline)
 ```
-
-**Validate**: `blueprint lint` shows `PASS` for all files
 
 ---
 
-## 6. Versioning Blueprints
+## Versioning
 
-Version blueprints by creating separate classes with `V{N}` suffix:
+When user needs to version blueprints for backwards compatibility:
+
+### Version Naming Convention
+
+- v1: `MyBlueprint` (no suffix)
+- v2: `MyBlueprintV2`
+- v3: `MyBlueprintV3`
 
 ```python
 # v1 - original
 class ExtractConfig(BaseModel):
     source_table: str
-    batch_size: int = 1000
 
 class Extract(Blueprint[ExtractConfig]):
-    def render(self, config: ExtractConfig) -> TaskGroup:
-        # v1 implementation
-        ...
+    def render(self, config): ...
 
-# v2 - breaking changes
+# v2 - breaking changes, new class
 class ExtractV2Config(BaseModel):
-    sources: list[SourceDef]
-    parallel: bool = True
+    sources: list[dict]  # Different schema
 
 class ExtractV2(Blueprint[ExtractV2Config]):
-    def render(self, config: ExtractV2Config) -> TaskGroup:
-        # v2 implementation
-        ...
+    def render(self, config): ...
 ```
 
 ### Using Versions in YAML
 
 ```yaml
 steps:
-  # Pinned to v1
-  extract_legacy:
+  # Pin to v1
+  legacy_extract:
     blueprint: extract
     version: 1
-    source_table: raw.customers
+    source_table: raw.data
 
-  # Latest version (v2)
-  extract_new:
+  # Use latest (v2)
+  new_extract:
     blueprint: extract
-    sources:
-      - schema_name: raw
-        table: orders
+    sources: [{table: orders}]
 ```
 
 ---
 
-## 7. Generate Schemas for Astro IDE
+## Schema Generation
 
-For the Astro IDE to discover blueprints, generate JSON schemas:
+For Astro IDE integration, generate JSON schemas:
 
 ```bash
+# Create output directory
+mkdir -p blueprint/generated-schemas
+
 # Generate schema for each blueprint
 blueprint schema extract > blueprint/generated-schemas/extract.schema.json
 blueprint schema load > blueprint/generated-schemas/load.schema.json
@@ -342,148 +261,60 @@ The IDE reads `blueprint/generated-schemas/` to render configuration forms.
 
 ---
 
-## Final Validation Checklist
-
-Before finalizing, verify:
-
-- [ ] **Package installed**: `airflow-blueprint>=0.1.1` in requirements
-- [ ] **Blueprints discoverable**: `blueprint list` shows your templates
-- [ ] **YAML valid**: `blueprint lint` passes for all `*.dag.yaml` files
-- [ ] **Loader exists**: `dags/loader.py` calls `build_all()`
-- [ ] **No duplicate dag_ids**: Each YAML has a unique `dag_id`
-
----
-
-## User Must Test
-
-- [ ] DAG parses in Airflow UI (no import/parse errors)
-- [ ] `af dags errors` shows no errors for Blueprint DAGs
-- [ ] Manual DAG run succeeds (at least one step)
-- [ ] Step config visible in Airflow "Rendered Template" tab
-
----
-
 ## Troubleshooting
 
-### Blueprint Not Found
+### "Blueprint not found"
 
-```
-Error: Blueprint 'extract' not found
-```
+**Cause**: Blueprint class not in Python path.
 
-**Cause**: Blueprint class not discovered.
-
-**Fix**: Ensure blueprint file is in `dags/` or use `--template-dir`:
+**Fix**: Check template directory or use `--template-dir`:
 ```bash
 blueprint list --template-dir dags/templates/
 ```
 
-### Validation Error on Unknown Field
+### "Extra inputs are not permitted"
 
-```
-Error: Extra inputs are not permitted
-```
+**Cause**: YAML field name typo with `extra="forbid"` enabled.
 
-**Cause**: Typo in YAML field name with `extra="forbid"` config.
+**Fix**: Run `blueprint describe <name>` to see valid field names.
 
-**Fix**: Check field names match the Pydantic model exactly:
-```bash
-blueprint describe extract  # Shows valid fields
-```
+### DAG not appearing in Airflow
 
-### DAG Not Loading
+**Cause**: Missing or broken loader.
 
-**Cause**: `loader.py` missing or not calling `build_all()`.
-
-**Fix**: Ensure `dags/loader.py` exists:
+**Fix**: Ensure `dags/loader.py` exists and calls `build_all()`:
 ```python
 from blueprint import build_all
 build_all()
 ```
 
-### Cyclic Dependency Error
+### "Cyclic dependency detected"
 
-```
-Error: Cyclic dependency detected
-```
+**Cause**: Circular `depends_on` references.
 
-**Cause**: Steps have circular `depends_on` references.
+**Fix**: Review step dependencies and remove cycles.
 
-**Fix**: Review `depends_on` fields and remove cycles.
+### Debugging in Airflow UI
 
----
-
-## Debugging in Airflow UI
-
-Every task rendered by Blueprint exposes context in **Rendered Template**:
-
-- `blueprint_step_config` - resolved YAML config for the step
-- `blueprint_step_code` - full Python source of the blueprint class
+Every Blueprint task has extra fields in **Rendered Template**:
+- `blueprint_step_config` - resolved YAML config
+- `blueprint_step_code` - Python source of blueprint
 
 ---
 
-## Project Structure
+## Verification Checklist
 
-```
-dags/
-├── templates/           # Blueprint Python classes
-│   └── etl_blueprints.py
-├── loader.py            # build_all() entry point
-├── customer_pipeline.dag.yaml
-└── orders_pipeline.dag.yaml
-blueprint/
-└── generated-schemas/   # JSON schemas for Astro IDE
-    ├── extract.schema.json
-    └── load.schema.json
-```
+Before finishing, verify with user:
 
----
-
-## Programmatic Building
-
-For advanced use cases, build DAGs in Python:
-
-```python
-from blueprint import Builder, DAGConfig
-
-config = DAGConfig(
-    dag_id="dynamic_pipeline",
-    schedule="@hourly",
-    steps={
-        "step1": {"blueprint": "extract", "source_table": "raw.data"},
-        "step2": {"blueprint": "load", "depends_on": ["step1"], "target_table": "out"},
-    }
-)
-
-dag = Builder().build(config)
-```
-
----
-
-## Blueprint vs DAG Factory
-
-| Aspect | Blueprint | DAG Factory |
-|--------|-----------|-------------|
-| Abstraction | Task group templates with validation | Full Airflow API exposure |
-| Validation | Pydantic type-safe configs | Raw YAML |
-| Target users | Platform teams + analysts | Airflow-savvy users |
-| Use case | Standardized, governed workflows | Maximum flexibility |
-
-**Use Blueprint** when you want validated, reusable templates for teams.
-**Use DAG Factory** when you need full Airflow flexibility.
+- [ ] `blueprint list` shows their templates
+- [ ] `blueprint lint` passes for all YAML files
+- [ ] `dags/loader.py` exists with `build_all()`
+- [ ] DAG appears in Airflow UI without parse errors
 
 ---
 
 ## Reference
 
-- Blueprint GitHub: https://github.com/astronomer/blueprint
-- Blueprint PyPI: https://pypi.org/project/airflow-blueprint/
-- Astro IDE Blueprint docs: https://docs.astronomer.io/astro/ide-blueprint
-
----
-
-## Related Skills
-
-- **authoring-dags**: General DAG authoring patterns
-- **testing-dags**: Testing DAGs after creation
-- **cosmos-dbt-core**: Running dbt projects in Airflow
+- GitHub: https://github.com/astronomer/blueprint
+- PyPI: https://pypi.org/project/airflow-blueprint/
+- Astro IDE docs: https://docs.astronomer.io/astro/ide-blueprint

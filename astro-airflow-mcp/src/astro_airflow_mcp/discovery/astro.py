@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -12,6 +13,10 @@ from astro_airflow_mcp.discovery.astro_cli import (
     AstroDeployment,
 )
 from astro_airflow_mcp.discovery.base import DiscoveredInstance, DiscoveryError
+
+logger = logging.getLogger(__name__)
+
+LEGACY_TOKEN_NAME = "af-cli-discover"  # nosec B105 - not a password
 
 
 class AstroDiscoveryError(DiscoveryError):
@@ -49,8 +54,6 @@ class AstroDiscoveryBackend:
     deployment tokens for authentication.
     """
 
-    TOKEN_NAME = AstroCli.TOKEN_NAME
-
     def __init__(self, cli: AstroCli | None = None) -> None:
         """Initialize the Astro discovery backend.
 
@@ -58,6 +61,12 @@ class AstroDiscoveryBackend:
             cli: Optional AstroCli instance (creates one if not provided)
         """
         self._cli = cli or AstroCli()
+        self._token_name = self._cli.get_token_name()
+
+    @property
+    def token_name(self) -> str:
+        """Get the user-specific token name for discovery."""
+        return self._token_name
 
     @property
     def name(self) -> str:
@@ -106,10 +115,25 @@ class AstroDiscoveryBackend:
             workspace_map = self._get_workspace_map()
 
         instances: list[DiscoveredInstance] = []
+        legacy_deployments: list[str] = []
         for dep_data in deployments_data:
             instance = self._deployment_to_instance(dep_data, create_tokens, workspace_map)
             if instance:
                 instances.append(instance)
+                # Check for legacy token from before user-specific naming
+                dep_id = dep_data.get("deployment_id", "")
+                if dep_id and self._has_legacy_token(dep_id):
+                    legacy_deployments.append(instance.name)
+
+        if legacy_deployments:
+            names = ", ".join(legacy_deployments)
+            logger.warning(
+                "Found legacy '%s' token in deployments: %s. "
+                "Discovery now uses user-specific token names. "
+                "Consider removing the legacy token from the Astro UI.",
+                LEGACY_TOKEN_NAME,
+                names,
+            )
 
         return instances
 
@@ -195,6 +219,20 @@ class AstroDiscoveryBackend:
             },
         )
 
+    def _has_legacy_token(self, deployment_id: str) -> bool:
+        """Check if a deployment has the old shared 'af-cli-discover' token.
+
+        Args:
+            deployment_id: The deployment ID
+
+        Returns:
+            True if the legacy token exists
+        """
+        try:
+            return self._cli.token_exists(deployment_id, LEGACY_TOKEN_NAME)
+        except AstroCliError:
+            return False
+
     def _get_or_create_token(self, deployment_id: str) -> str | None:
         """Get existing token or create a new one.
 
@@ -205,9 +243,9 @@ class AstroDiscoveryBackend:
             Token value or None if token already exists or creation fails
         """
         try:
-            if self._cli.token_exists(deployment_id, self.TOKEN_NAME):
+            if self._cli.token_exists(deployment_id, self.token_name):
                 return None
-            return self._cli.create_deployment_token(deployment_id, self.TOKEN_NAME)
+            return self._cli.create_deployment_token(deployment_id, self.token_name)
         except AstroCliError:
             return None
 
@@ -221,7 +259,7 @@ class AstroDiscoveryBackend:
             True if token exists
         """
         try:
-            return self._cli.token_exists(deployment_id, self.TOKEN_NAME)
+            return self._cli.token_exists(deployment_id, self.token_name)
         except AstroCliError:
             return False
 
@@ -238,6 +276,6 @@ class AstroDiscoveryBackend:
             AstroDiscoveryError: If token creation fails
         """
         try:
-            return self._cli.create_deployment_token(deployment_id, self.TOKEN_NAME)
+            return self._cli.create_deployment_token(deployment_id, self.token_name)
         except AstroCliError as e:
             raise AstroDiscoveryError(f"Failed to create token: {e}") from e

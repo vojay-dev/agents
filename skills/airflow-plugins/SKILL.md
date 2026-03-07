@@ -168,11 +168,25 @@ fetch('/my-plugin/api/dags') // breaks on Astro and sub-path deploys
 
 ## Step 4: Call the Airflow API from your plugin
 
+> **Only needed if your plugin calls the Airflow REST API.** Plugins that only serve static files, register `external_views`, or use direct DB access do not need this step — skip to Step 5 or Step 6.
+
+### Add the dependency
+
+Only if REST API communication is being implemented: add `apache-airflow-client` to the project's dependencies. Check which file exists and act accordingly:
+
+| File found | Action |
+|------------|--------|
+| `requirements.txt` | Append `apache-airflow-client` |
+| `pyproject.toml` (uv / poetry) | `uv add apache-airflow-client` or `poetry add apache-airflow-client` |
+| None of the above | Tell the user: "Add `apache-airflow-client` to your dependencies before running the plugin." |
+
 Use `apache-airflow-client` to talk to Airflow's own REST API. The SDK is **synchronous** but FastAPI routes are async — never call blocking SDK methods directly inside `async def` or you will stall the event loop and freeze all concurrent requests.
 
 ### JWT token management
 
 Cache one token per process. Refresh 5 minutes before the 1-hour expiry. Use double-checked locking so multiple concurrent requests don't all race to refresh simultaneously:
+
+> Replace `MYPLUGIN_` with a short uppercase prefix derived from the plugin name (e.g. if the plugin is called "Trip Analyzer", use `TRIP_ANALYZER_`). If no plugin name has been given yet, ask the user before writing env var names.
 
 ```python
 import asyncio
@@ -180,34 +194,44 @@ import os
 import threading
 import time
 import airflow_client.client as airflow_sdk
+import requests
 
-AIRFLOW_HOST = os.environ.get("MYPLUGIN_HOST",     "http://localhost:8080")
-AIRFLOW_USER = os.environ.get("MYPLUGIN_USERNAME", "admin")
-AIRFLOW_PASS = os.environ.get("MYPLUGIN_PASSWORD", "admin")
+AIRFLOW_HOST  = os.environ.get("MYPLUGIN_HOST",     "http://localhost:8080")
+AIRFLOW_USER  = os.environ.get("MYPLUGIN_USERNAME", "admin")
+AIRFLOW_PASS  = os.environ.get("MYPLUGIN_PASSWORD", "admin")
+AIRFLOW_TOKEN = os.environ.get("MYPLUGIN_TOKEN")    # Astronomer Astro: Deployment API token
 
 _cached_token: str | None = None
 _token_expires_at: float  = 0.0
 _token_lock = threading.Lock()
 
 
+def _fetch_fresh_token() -> str:
+    """Exchange username/password for a JWT via Airflow's auth endpoint."""
+    response = requests.post(
+        f"{AIRFLOW_HOST}/auth/token",
+        json={"username": AIRFLOW_USER, "password": AIRFLOW_PASS},
+        timeout=10,
+    )
+    response.raise_for_status()
+    return response.json()["access_token"]
+
+
 def _get_token() -> str:
+    # Astronomer Astro production: use static Deployment API token directly
+    if AIRFLOW_TOKEN:
+        return AIRFLOW_TOKEN
     global _cached_token, _token_expires_at
+    now = time.monotonic()
     # Fast path — no lock if still valid
-    if _cached_token and time.time() < _token_expires_at - 300:
+    if _cached_token and now < _token_expires_at:
         return _cached_token
     # Slow path — one thread refreshes, others wait
     with _token_lock:
-        if _cached_token and time.time() < _token_expires_at - 300:
+        if _cached_token and now < _token_expires_at:
             return _cached_token
-        config = airflow_sdk.Configuration(host=AIRFLOW_HOST)
-        with airflow_sdk.ApiClient(config) as client:
-            resp = client.call_api(
-                "/auth/token", "POST",
-                body={"username": AIRFLOW_USER, "password": AIRFLOW_PASS},
-                response_type="object",
-            )
-            _cached_token = resp["access_token"]
-            _token_expires_at = time.time() + 3600
+        _cached_token = _fetch_fresh_token()
+        _token_expires_at = now + 55 * 60  # refresh 5 min before 1-hour expiry
     return _cached_token
 
 
@@ -217,23 +241,35 @@ def _make_config() -> airflow_sdk.Configuration:
     return config
 ```
 
+After implementing auth, tell the user:
+
+- **Local development**: set `MYPLUGIN_USERNAME` and `MYPLUGIN_PASSWORD` in `.env` — JWT exchange happens automatically.
+- **Astronomer Astro (production)**: create a Deployment API token and set it as `MYPLUGIN_TOKEN` — the JWT exchange is skipped entirely:
+  1. Astro UI → open the Deployment → **Access** → **API Tokens** → **+ Deployment API Token**
+  2. Copy the token value (shown only once)
+  3. `astro deployment variable create MYPLUGIN_TOKEN=<token>`
+
+  `MYPLUGIN_USERNAME` and `MYPLUGIN_PASSWORD` are not needed on Astro.
+
 ### Wrapping SDK calls with asyncio.to_thread
 
 ```python
 from fastapi import HTTPException
-from airflow_client.client.api.dag_api import DagApi
+from airflow_client.client.api import DAGApi
 
 @app.get("/api/dags")
 async def list_dags():
     try:
         def _fetch():
             with airflow_sdk.ApiClient(_make_config()) as client:
-                return DagApi(client).get_dags(limit=100).dags
+                return DAGApi(client).get_dags(limit=100).dags
         dags = await asyncio.to_thread(_fetch)
-        return [{"dag_id": d.dag_id, "is_paused": d.is_paused} for d in dags]
+        return [{"dag_id": d.dag_id, "is_paused": d.is_paused, "timetable_summary": d.timetable_summary} for d in dags]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 ```
+
+> **API field names**: Never guess response field names — verify against the [REST API reference](https://airflow.apache.org/docs/apache-airflow/stable/stable-rest-api-ref.html). Key `DAGResponse` fields: `dag_id`, `dag_display_name`, `description`, `is_paused`, `timetable_summary`, `timetable_description`, `fileloc`, `owners`, `tags`.
 
 The pattern is always: define a plain inner `def _fetch()` with all SDK logic, then `await asyncio.to_thread(_fetch)`.
 
@@ -267,17 +303,18 @@ Prefer `apache-airflow-client` over direct DB access when possible. The internal
 
 ## Step 5: Common API endpoint patterns
 
+> **If you need an SDK method or field not shown in the examples below**, verify it before generating code — do not guess. Either run `python3 -c "from airflow_client.client.api import <Class>; print([m for m in dir(<Class>) if not m.startswith('_')])"` in any environment where the SDK is installed, or search the [`apache/airflow-client-python`](https://github.com/apache/airflow-client-python) repo for the class definition.
+
 ```python
-from airflow_client.client.api.dag_run_api import DagRunApi
-from airflow_client.client.model.trigger_dag_run_post import TriggerDAGRunPost
-from airflow_client.client.model.dag_patch_body import DAGPatchBody
+from airflow_client.client.api import DAGApi, DagRunApi
+from airflow_client.client.models import TriggerDAGRunPostBody, DAGPatchBody
 
 
 @app.post("/api/dags/{dag_id}/trigger")
 async def trigger_dag(dag_id: str):
     def _run():
         with airflow_sdk.ApiClient(_make_config()) as client:
-            return DagRunApi(client).post_dag_run(dag_id, TriggerDAGRunPost())
+            return DagRunApi(client).trigger_dag_run(dag_id, TriggerDAGRunPostBody())
     result = await asyncio.to_thread(_run)
     return {"run_id": result.dag_run_id, "state": normalize_state(result.state)}
 
@@ -286,7 +323,7 @@ async def trigger_dag(dag_id: str):
 async def toggle_pause(dag_id: str, is_paused: bool):
     def _run():
         with airflow_sdk.ApiClient(_make_config()) as client:
-            DagApi(client).patch_dag(dag_id, DAGPatchBody(is_paused=is_paused))
+            DAGApi(client).patch_dag(dag_id, DAGPatchBody(is_paused=is_paused))
     await asyncio.to_thread(_run)
     return {"dag_id": dag_id, "is_paused": is_paused}
 
@@ -295,7 +332,7 @@ async def toggle_pause(dag_id: str, is_paused: bool):
 async def delete_dag(dag_id: str):
     def _run():
         with airflow_sdk.ApiClient(_make_config()) as client:
-            DagApi(client).delete_dag(dag_id)
+            DAGApi(client).delete_dag(dag_id)
     await asyncio.to_thread(_run)
     return {"deleted": dag_id}
 
@@ -312,8 +349,7 @@ def normalize_state(raw) -> str:
 These are the most common calls beyond basic DAG CRUD. For anything not shown here, consult the [REST API reference](https://airflow.apache.org/docs/apache-airflow/stable/stable-rest-api-ref.html) for available endpoints and the matching Python SDK class/method names.
 
 ```python
-from airflow_client.client.api.dag_run_api import DagRunApi
-from airflow_client.client.api.task_instance_api import TaskInstanceApi
+from airflow_client.client.api import DagRunApi, TaskInstanceApi
 
 # Latest run for a DAG
 @app.get("/api/dags/{dag_id}/runs/latest")

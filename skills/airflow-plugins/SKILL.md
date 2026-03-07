@@ -275,7 +275,9 @@ The pattern is always: define a plain inner `def _fetch()` with all SDK logic, t
 
 ### Alternative: Direct database access
 
-Since FastAPI plugin endpoints run inside the **API server process** (not in a task worker), they have direct access to Airflow's internal SQLAlchemy models — no HTTP round-trip or JWT needed:
+> **Warning — use with caution and tell the user.** The Airflow metadb is not a public interface. Direct writes or poorly-formed queries can corrupt scheduler state. Whenever you use this pattern, explicitly tell the user: "This accesses Airflow's internal database directly. The internal models are not part of the public API, can change between Airflow versions, and incorrect queries can cause issues in the metadb. Prefer `apache-airflow-client` unless the operation is not exposed via the REST API."
+
+Since FastAPI plugin endpoints run inside the **API server process** (not in a task worker), they have direct access to Airflow's internal SQLAlchemy models — no HTTP round-trip or JWT needed. Use only for read operations not exposed via the REST API, or when the extra HTTP overhead genuinely matters. Always wrap DB calls in `asyncio.to_thread()` — SQLAlchemy queries are blocking.
 
 ```python
 from airflow.models import DagBag, DagModel
@@ -296,8 +298,6 @@ async def dag_status():
         return _query()
     return await asyncio.to_thread(_fetch)
 ```
-
-Prefer `apache-airflow-client` over direct DB access when possible. The internal models (`DagBag`, `DagModel`, `provide_session`) are Airflow implementation details that can change between versions, and they bypass the official REST API abstraction. Use direct access only for operations not exposed via the REST API, or when the extra HTTP overhead genuinely matters. Always wrap DB calls in `asyncio.to_thread()` — SQLAlchemy queries are blocking.
 
 ---
 

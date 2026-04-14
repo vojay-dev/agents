@@ -495,14 +495,32 @@ Connect MCP clients to: `http://localhost:8000/mcp`
 
 ### Airflow Plugin Mode
 
-Install into your Airflow 3.x environment to expose MCP at `https://your-airflow/mcp/v1/`:
+Install into your Airflow 3.x environment to expose an MCP endpoint directly on the webserver. This lets AI tools connect to your Airflow instance remotely via the MCP protocol — no standalone server needed.
 
-```bash
-# Add to your Airflow project (Astro Runtime or open-source Airflow 3.x)
-echo astro-airflow-mcp >> requirements.txt
+The plugin runs inside Airflow's API server and forwards your auth token to internal API calls. It uses stateless HTTP transport, so it works with multiple API server replicas without session affinity.
+
+**Requirements:** Airflow 3.x (uses the FastAPI plugin system introduced in Airflow 3).
+
+#### Install
+
+Add `astro-airflow-mcp` to your `requirements.txt`:
+
+```
+astro-airflow-mcp
 ```
 
-Then configure your MCP client to connect via the `url` transport:
+The package auto-registers as an Airflow plugin. No Dockerfile changes or configuration needed.
+
+#### Environment variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AF_READ_ONLY` | Recommended | `false` | Set to `true` to block all write operations (trigger, pause, clear, delete) at the MCP server level, regardless of token permissions |
+| `FASTMCP_STATELESS_HTTP` | For Claude Code | `false` | Set to `true` to disable stateful sessions. Required for Claude Code, which does not persist `mcp-session-id` headers across requests |
+
+#### Connect your MCP client
+
+The MCP endpoint is available at `https://<your-airflow-url>/mcp/v1/`. Configure your client with a Bearer token that has permission to POST to the webserver:
 
 ```json
 {
@@ -510,33 +528,29 @@ Then configure your MCP client to connect via the `url` transport:
     "airflow": {
       "url": "https://<your-airflow-url>/mcp/v1/",
       "headers": {
-        "Authorization": "Bearer <your-token>"
+        "Authorization": "Bearer <TOKEN>"
       }
     }
   }
 }
 ```
 
-For Astro deployments, use your deployment URL and an API token:
+For Claude Code, use `-t http` (not `-t sse`):
 
-```json
-{
-  "mcpServers": {
-    "airflow": {
-      "url": "https://<deployment-url>/mcp/v1/",
-      "headers": {
-        "Authorization": "Bearer <astro-api-token>"
-      }
-    }
-  }
-}
+```bash
+claude mcp add -t http -s user \
+  -H "Authorization: Bearer <TOKEN>" \
+  -- airflow \
+  "https://<your-airflow-url>/mcp/v1/"
 ```
 
-Generate a token with `astro token` or from the Astro UI.
+#### Astro deployments
 
-**How it works:** The plugin runs inside Airflow's API server and forwards
-your auth token to internal API calls. It uses stateless HTTP transport,
-so it works with multiple API server replicas without session affinity.
+For full setup instructions on Astronomer Astro — including authentication, custom deployment roles, and troubleshooting — see the [Airflow MCP Plugin guide](https://www.astronomer.io/docs/astro/astro-mcp-server#airflow-mcp-plugin) in the Astro documentation.
+
+#### Open-source Airflow
+
+For open-source Airflow, the plugin inherits Airflow's native RBAC. A user with the Viewer role can use all read tools. Set environment variables in your deployment configuration and pass a Bearer token via your MCP client config.
 
 ### CLI Options
 
